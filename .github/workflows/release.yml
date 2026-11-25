@@ -17,9 +17,9 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -36,7 +36,9 @@ jobs:
         shell: bash
         run: |
           ./dist/dcheck.exe --help
-          echo "x" | ./dist/dcheck.exe --no-save --no-color | grep -q "INVALID"
+          echo "x" | ./dist/dcheck.exe --no-save --no-color > smoke.txt
+          cat smoke.txt
+          grep "INVALID" smoke.txt
 
       - uses: actions/upload-artifact@v4
         with:

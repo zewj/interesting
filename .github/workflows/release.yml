@@ -1,0 +1,46 @@
+name: Build dcheck.exe
+
+on:
+  push:
+    tags: ["v*"]        # pushing a tag like v0.1.0 builds the exe and publishes a release
+  workflow_dispatch:    # manual run: builds the exe as a downloadable artifact only
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip pyinstaller pytest
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Build dcheck.exe
+        run: pyinstaller --onefile --console --name dcheck dcheck_entry.py
+
+      - name: Smoke test the exe
+        shell: bash
+        run: |
+          ./dist/dcheck.exe --help
+          echo "x" | ./dist/dcheck.exe --no-save --no-color | grep -q "INVALID"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dcheck-windows
+          path: dist/dcheck.exe
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/dcheck.exe
+          generate_release_notes: true

@@ -1,0 +1,5 @@
+# one per line, or comma/space separated. Lines starting with # are ignored.
+wumpus
+nelly, clyde
+some_rare.name
+@SomeoneWithCaps

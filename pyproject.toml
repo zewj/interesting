@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dcheck"
+version = "0.1.0"
+description = "Bulk Discord username availability checker (CLI + local web UI)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+dcheck = "dcheck.cli:main"
+
+[tool.setuptools]
+packages = ["dcheck"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

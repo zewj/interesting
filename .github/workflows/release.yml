@@ -3,7 +3,12 @@ name: Build dcheck.exe
 on:
   push:
     tags: ["v*"]        # pushing a tag like v0.1.0 builds the exe and publishes a release
-  workflow_dispatch:    # manual run: builds the exe as a downloadable artifact only
+  workflow_dispatch:    # manual run from the Actions tab
+    inputs:
+      version:
+        description: "Release tag to create (e.g. v0.1.0). Leave empty to only build the exe as an artifact."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -39,8 +44,11 @@ jobs:
           path: dist/dcheck.exe
 
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.version != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.version || github.ref_name }}
+          name: dcheck ${{ inputs.version || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           files: dist/dcheck.exe
           generate_release_notes: true

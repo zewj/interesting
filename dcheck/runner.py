@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import re
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable
 
 from . import validate
 from .models import Result, Status
@@ -43,18 +42,27 @@ def prepare(names: Iterable[str]) -> tuple[list[str], list[Result]]:
 
 
 def run(
-    names: Sequence[str],
+    names: Iterable[str],
     client,
     *,
     workers: int = 3,
     on_result: Callable[[Result], None] | None = None,
+    keep_results: bool = True,
 ) -> list[Result]:
-    """Check every name with ``client.check`` concurrently; return results in input order."""
-    names = list(names)
-    results: list[Result | None] = [None] * len(names)
-    if not names:
-        return []
-    lock = threading.Lock()
+    """Check every name with ``client.check`` concurrently.
+
+    ``names`` may be a lazy iterator (e.g. millions of generated names): worker threads
+    pull from it one at a time, so nothing is queued up front. ``on_result`` is called
+    (serialized by a lock) as each check finishes. Returns results in input order, or
+    ``[]`` when ``keep_results`` is False. On Ctrl+C, workers stop after their current
+    name and ``KeyboardInterrupt`` is re-raised; anything already reported via
+    ``on_result`` is kept by the caller.
+    """
+    source = iter(enumerate(names))
+    src_lock = threading.Lock()
+    cb_lock = threading.Lock()
+    stop = threading.Event()
+    results: dict[int, Result] = {}
 
     def _check(name: str) -> Result:
         try:
@@ -62,15 +70,33 @@ def run(
         except Exception as exc:  # noqa: BLE001 - any failure becomes an ERROR result
             return Result(name, Status.ERROR, str(exc))
 
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futures = {pool.submit(_check, name): i for i, name in enumerate(names)}
-        for fut in as_completed(futures):
-            res = fut.result()
-            results[futures[fut]] = res
-            if on_result is not None:
-                with lock:
+    def _worker() -> None:
+        while not stop.is_set():
+            with src_lock:
+                try:
+                    i, name = next(source)
+                except StopIteration:
+                    return
+            res = _check(name)
+            if stop.is_set():
+                return
+            with cb_lock:
+                if keep_results:
+                    results[i] = res
+                if on_result is not None:
                     on_result(res)
-    return results  # type: ignore[return-value]
+
+    threads = [threading.Thread(target=_worker, daemon=True) for _ in range(max(1, workers))]
+    for t in threads:
+        t.start()
+    try:
+        for t in threads:
+            while t.is_alive():
+                t.join(0.2)  # short joins keep the main thread responsive to Ctrl+C
+    except KeyboardInterrupt:
+        stop.set()
+        raise
+    return [results[i] for i in sorted(results)]
 
 
 def summarize(results: Iterable[Result]) -> dict[str, int]:

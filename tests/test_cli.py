@@ -3,7 +3,6 @@ import io
 import json
 import re
 import sys
-import types
 
 import pytest
 
@@ -31,6 +30,12 @@ class FakeClient:
 class TTYStringIO(io.StringIO):
     def isatty(self):
         return True
+
+
+@pytest.fixture(autouse=True)
+def _in_tmp(tmp_path, monkeypatch):
+    # results/ is written to the current directory by default
+    monkeypatch.chdir(tmp_path)
 
 
 @pytest.fixture
@@ -94,7 +99,11 @@ def test_dash_means_stdin(tmp_path, monkeypatch, fake, capsys):
     assert sorted(fake.checked) == ["fromfile", "fromstdin"]
 
 
-def test_no_input_exits_2(fake, no_stdin, capsys):
+def test_no_input_exits_2(monkeypatch, fake, no_stdin, capsys):
+    def eof(prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", eof)
     assert cli.main([]) == 2
     assert "no input" in capsys.readouterr().err
     assert fake.checked == []
@@ -185,7 +194,7 @@ def test_no_color_when_not_tty(tmp_path, fake, no_stdin, capsys):
 def test_summary_line(tmp_path, fake, no_stdin, capsys):
     f = write(tmp_path, "n.txt", "avone takenone takentwo errone x\n")
     assert cli.main([f, "--no-color"]) == 0
-    last = capsys.readouterr().out.strip().splitlines()[-1]
+    last = next(l for l in capsys.readouterr().out.splitlines() if l.startswith("Done:"))
     assert last.startswith("Done: 5 checked")
     assert "1 available" in last
     assert "2 taken" in last
@@ -200,29 +209,141 @@ def test_client_args(tmp_path, fake, no_stdin, capsys):
     assert (args.workers, args.delay, args.timeout) == (5, 1.5, 3.0)
 
 
-def test_web_calls_serve(monkeypatch, fake, no_stdin):
-    calls = []
-    fake_web = types.ModuleType("dcheck.web")
-    fake_web.serve = lambda *a, **kw: calls.append((a, kw))
-    monkeypatch.setitem(sys.modules, "dcheck.web", fake_web)
-    import dcheck
-
-    monkeypatch.setattr(dcheck, "web", fake_web, raising=False)
-
-    rc = cli.main(["--web", "--host", "0.0.0.0", "--port", "9999",
-                   "-w", "4", "--delay", "0.25", "--timeout", "7"])
-    assert rc == 0
-    assert calls == [(("0.0.0.0", 9999), {"workers": 4, "min_interval": 0.25, "timeout": 7.0})]
+def test_no_input_no_interactive_exits_2(fake, no_stdin, capsys):
+    assert cli.main(["--no-interactive"]) == 2
     assert fake.checked == []
 
 
-def test_web_defaults(monkeypatch, fake, no_stdin):
-    calls = []
-    fake_web = types.ModuleType("dcheck.web")
-    fake_web.serve = lambda *a, **kw: calls.append((a, kw))
-    monkeypatch.setitem(sys.modules, "dcheck.web", fake_web)
-    import dcheck
+def test_interactive_pasted_names(monkeypatch, tmp_path, fake, no_stdin, capsys):
+    monkeypatch.chdir(tmp_path)
+    answers = iter(["1", "avone, takenone", "avtwo", "", ""])  # menu, names, blank, Enter
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert cli.main([]) == 0
+    assert fake.checked == ["avone", "takenone", "avtwo"]
+    assert (tmp_path / "results" / "available.txt").read_text().split() == ["avone", "avtwo"]
+    assert "Results saved to" in capsys.readouterr().out
 
-    monkeypatch.setattr(dcheck, "web", fake_web, raising=False)
-    assert cli.main(["--web"]) == 0
-    assert calls == [(("127.0.0.1", 8765), {"workers": 3, "min_interval": 0.5, "timeout": 10.0})]
+
+def test_interactive_dragged_file(monkeypatch, tmp_path, fake, no_stdin, capsys):
+    monkeypatch.chdir(tmp_path)
+    f = write(tmp_path, "list.txt", "avone\ntakenone\n")
+    answers = iter(["1", f'"{f}"', "", ""])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert cli.main([]) == 0
+    assert fake.checked == ["avone", "takenone"]
+
+
+def test_interactive_nothing_entered(monkeypatch, fake, no_stdin, capsys):
+    def eof(prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", eof)
+    assert cli.main([]) == 2
+    assert fake.checked == []
+
+
+def test_default_usernames_txt_from_menu(monkeypatch, tmp_path, fake, no_stdin, capsys):
+    write(tmp_path, "usernames.txt", "avone\ntakenone\n")
+    answers = iter(["1", ""])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert cli.main([]) == 0
+    assert fake.checked == ["avone", "takenone"]
+    assert (tmp_path / "results" / "available.txt").read_text() == "avone\n"
+
+
+def test_default_usernames_txt_non_interactive(tmp_path, fake, no_stdin, capsys):
+    write(tmp_path, "usernames.txt", "avone\n")
+    assert cli.main(["--no-interactive"]) == 0
+    assert fake.checked == ["avone"]
+
+
+def test_results_saved_by_default(tmp_path, fake, no_stdin, capsys):
+    f = write(tmp_path, "n.txt", "avone takenone\n")
+    assert cli.main([f]) == 0
+    assert (tmp_path / "results" / "available.txt").read_text() == "avone\n"
+    assert (tmp_path / "results" / "taken.txt").read_text() == "takenone\n"
+
+
+def test_no_save(tmp_path, fake, no_stdin, capsys):
+    f = write(tmp_path, "n.txt", "avone\n")
+    assert cli.main([f, "--no-save"]) == 0
+    assert not (tmp_path / "results").exists()
+
+
+def test_new_run_replaces_old_results(tmp_path, fake, no_stdin, capsys):
+    out = tmp_path / "results"
+    out.mkdir()
+    (out / "available.txt").write_text("stale\n")
+    f = write(tmp_path, "n.txt", "avone\n")
+    assert cli.main([f]) == 0
+    assert (out / "available.txt").read_text() == "avone\n"
+
+
+def test_resume_skips_done_names(tmp_path, fake, no_stdin, capsys):
+    out = tmp_path / "results"
+    out.mkdir()
+    (out / "taken.txt").write_text("takenone\n")
+    (out / "errors.txt").write_text("errold\n")
+    f = write(tmp_path, "n.txt", "takenone avone\n")
+    assert cli.main([f, "--resume"]) == 0
+    assert fake.checked == ["avone"]
+    assert (out / "taken.txt").read_text() == "takenone\n"
+    assert not (out / "errors.txt").exists()  # errors are retried, so the old file is reset
+
+
+def test_gen_2c_digits(tmp_path, fake, no_stdin, capsys):
+    assert cli.main(["--gen", "2", "--charset", "digits", "-w", "2"]) == 0
+    assert sorted(fake.checked) == [f"{a}{b}" for a in "0123456789" for b in "0123456789"]
+    out = tmp_path / "results" / "2c-digits"
+    assert len((out / "taken.txt").read_text().split()) == 100
+    text = capsys.readouterr().out
+    assert "...100/100 checked" in text  # progress line instead of 100 TAKEN lines
+    assert "[TAKEN]" not in text
+
+
+def test_gen_resumes_automatically(tmp_path, fake, no_stdin, capsys):
+    assert cli.main(["--gen", "2", "--charset", "digits", "--limit", "30"]) == 0
+    first = list(fake.checked)
+    assert len(first) == 30
+    fake.checked.clear()
+    assert cli.main(["--gen", "2", "--charset", "digits"]) == 0
+    assert len(fake.checked) == 70
+    assert not set(first) & set(fake.checked)
+    fake.checked.clear()
+    assert cli.main(["--gen", "2", "--charset", "digits"]) == 0
+    assert fake.checked == []
+    assert "Nothing left to check" in capsys.readouterr().out
+
+
+def test_gen_fresh_starts_over(tmp_path, fake, no_stdin, capsys):
+    assert cli.main(["--gen", "2", "--charset", "digits", "--limit", "10"]) == 0
+    fake.checked.clear()
+    assert cli.main(["--gen", "2", "--charset", "digits", "--fresh", "--limit", "10"]) == 0
+    assert len(fake.checked) == 10
+
+
+def test_gen_from_menu(monkeypatch, tmp_path, fake, no_stdin, capsys):
+    answers = iter(["2", "", ""])  # 2c, no _/., Enter to exit
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    monkeypatch.setattr(cli.generate, "CHARSETS", {**cli.generate.CHARSETS, "alnum": "av"})
+    assert cli.main([]) == 0
+    assert sorted(fake.checked) == ["aa", "av", "va", "vv"]
+    assert (tmp_path / "results" / "2c-alnum" / "available.txt").read_text().split() == ["av"]
+
+
+def test_ctrl_c_keeps_found_names(tmp_path, monkeypatch, no_stdin, capsys):
+    class AlwaysFree:
+        def check(self, name):
+            return Result(name, Status.AVAILABLE)
+
+    def fake_run(names, client, *, workers, on_result, keep_results):
+        it = iter(names)
+        on_result(client.check(next(it)))
+        on_result(client.check(next(it)))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "make_client", lambda args: AlwaysFree())
+    monkeypatch.setattr(cli.runner, "run", fake_run)
+    f = write(tmp_path, "n.txt", "one two three four\n")
+    assert cli.main([f]) == 130
+    assert (tmp_path / "results" / "available.txt").read_text().split() == ["one", "two"]

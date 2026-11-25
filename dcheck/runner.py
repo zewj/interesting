@@ -54,15 +54,16 @@ def run(
     ``names`` may be a lazy iterator (e.g. millions of generated names): worker threads
     pull from it one at a time, so nothing is queued up front. ``on_result`` is called
     (serialized by a lock) as each check finishes. Returns results in input order, or
-    ``[]`` when ``keep_results`` is False. On Ctrl+C, workers stop after their current
-    name and ``KeyboardInterrupt`` is re-raised; anything already reported via
-    ``on_result`` is kept by the caller.
+    ``[]`` when ``keep_results`` is False. On Ctrl+C, no further ``on_result`` calls are
+    made and ``KeyboardInterrupt`` is re-raised; anything already reported is kept by the
+    caller. If ``on_result`` raises, the run stops and that exception is re-raised.
     """
     source = iter(enumerate(names))
     src_lock = threading.Lock()
     cb_lock = threading.Lock()
     stop = threading.Event()
     results: dict[int, Result] = {}
+    failure: list[BaseException] = []
 
     def _check(name: str) -> Result:
         try:
@@ -81,10 +82,17 @@ def run(
             if stop.is_set():
                 return
             with cb_lock:
+                if stop.is_set():
+                    return
                 if keep_results:
                     results[i] = res
                 if on_result is not None:
-                    on_result(res)
+                    try:
+                        on_result(res)
+                    except BaseException as exc:  # e.g. a result file can't be written
+                        failure.append(exc)
+                        stop.set()
+                        return
 
     threads = [threading.Thread(target=_worker, daemon=True) for _ in range(max(1, workers))]
     for t in threads:
@@ -94,8 +102,11 @@ def run(
             while t.is_alive():
                 t.join(0.2)  # short joins keep the main thread responsive to Ctrl+C
     except KeyboardInterrupt:
-        stop.set()
+        with cb_lock:  # wait for any in-flight on_result call; none start after this
+            stop.set()
         raise
+    if failure:
+        raise failure[0]
     return [results[i] for i in sorted(results)]
 
 

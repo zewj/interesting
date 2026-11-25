@@ -114,7 +114,8 @@ Each name ends up in one file in the output folder:
 | error | `errors.txt` | Couldn't be checked (network problem, kept being rate-limited, blocked). These are retried on the next run |
 
 A file is only created if at least one name lands in it. A plain list check (not `--gen`)
-starts these files fresh each time, unless you pass `--resume`.
+starts these files fresh each time, unless you pass `--resume`. Nothing is ever deleted:
+the previous run's files are moved into `results/previous-<date-time>/` first.
 
 ## Limits & notes
 

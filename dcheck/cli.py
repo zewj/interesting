@@ -50,7 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("files", nargs="*", metavar="FILE",
                    help="files with usernames (newline/comma/space separated, # comments); "
-                        f"'-' reads stdin; with nothing given, {DEFAULT_LIST_FILE} is used")
+                        f"'-' reads stdin; with nothing given you get a menu (which offers "
+                        f"{DEFAULT_LIST_FILE} if it exists)")
     g = p.add_argument_group("short-name generator")
     g.add_argument("--gen", type=int, nargs="+", choices=(2, 3, 4), metavar="N",
                    help="check every N-character name (2, 3 and/or 4); output goes to "
@@ -99,6 +100,17 @@ def _stdin_is_tty() -> bool:
     return bool(sys.stdin is not None and isatty and isatty())
 
 
+def read_text(path: Path | str) -> str:
+    """Read a username file whatever Notepad/PowerShell saved it as (UTF-8, UTF-16, ANSI)."""
+    data = Path(path).read_bytes()
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("cp1252", errors="replace")
+
+
 def _read_files(files: Sequence[str]) -> str:
     chunks = []
     stdin_used = False
@@ -108,7 +120,7 @@ def _read_files(files: Sequence[str]) -> str:
                 chunks.append(sys.stdin.read())
                 stdin_used = True
         else:
-            chunks.append(Path(f).read_text(encoding="utf-8-sig"))
+            chunks.append(read_text(f))
     return "\n".join(chunks)
 
 
@@ -153,7 +165,7 @@ def _read_pasted_list() -> str | None:
     if len(lines) == 1:
         candidate = lines[0].strip().strip('"').strip("'")
         if candidate and Path(candidate).is_file():
-            return Path(candidate).read_text(encoding="utf-8-sig")
+            return read_text(candidate)
     return "\n".join(lines)
 
 
@@ -176,7 +188,7 @@ def interactive_menu(args: argparse.Namespace) -> str | None:
     choice = _ask("\nChoose 1-4: ").strip()
     if choice == "1":
         if default_list:
-            return default_list.read_text(encoding="utf-8-sig")
+            return read_text(default_list)
         print()
         return _read_pasted_list()
     if choice in ("2", "3", "4"):
@@ -196,9 +208,19 @@ class ResultWriter:
     def __init__(self, out: Path, *, resume: bool):
         self.out = out
         self._handles: dict[Status, object] = {}
-        stale = _OUT_FILES.values() if not resume else [_OUT_FILES[Status.ERROR]]
-        for fname in stale:  # errors are always retried, so start that file over
-            (out / fname).unlink(missing_ok=True)
+        self.closed = False
+        self.backup: Path | None = None
+        if resume:
+            # errors are retried, so that file starts over; everything else is appended to
+            (out / _OUT_FILES[Status.ERROR]).unlink(missing_ok=True)
+            return
+        # a new run never destroys old results: move them into results/previous-<time>/
+        old = [out / f for f in _OUT_FILES.values() if (out / f).is_file()]
+        if old:
+            self.backup = out / time.strftime("previous-%Y%m%d-%H%M%S")
+            self.backup.mkdir(parents=True, exist_ok=True)
+            for f in old:
+                f.replace(self.backup / f.name)
 
     def write(self, r: Result) -> None:
         fh = self._handles.get(r.status)
@@ -210,6 +232,7 @@ class ResultWriter:
         fh.flush()
 
     def close(self) -> None:
+        self.closed = True
         for fh in self._handles.values():
             fh.close()
         self._handles.clear()
@@ -300,16 +323,39 @@ def _get_input(args: argparse.Namespace) -> tuple[str | None, bool]:
     if args.gen:
         return None, False
     if sys.stdin is not None and not _stdin_is_tty():
+        print("Reading usernames from stdin (end with Ctrl+D, or Ctrl+Z then Enter on "
+              "Windows)...", file=sys.stderr)
         piped = sys.stdin.read()
         if piped.strip():
             return piped, False
     elif not args.no_interactive and _stdin_is_tty():
         return interactive_menu(args), True
     default_list = find_default_list()
-    return (default_list.read_text(encoding="utf-8-sig") if default_list else None), False
+    return (read_text(default_list) if default_list else None), False
+
+
+def _safe_console() -> None:
+    """Never crash on names the console encoding can't show (e.g. redirected on Windows)."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except Exception:
+                pass
 
 
 def main(argv: list[str] | None = None) -> int:
+    _safe_console()
+    try:
+        return _main(argv)
+    except Exception as exc:  # last resort: show the problem instead of a vanishing window
+        print(f"dcheck: unexpected error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        if getattr(sys, "frozen", False) and _stdin_is_tty():
+            _finish(1, True)
+        return 1
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -334,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     interactive = False
     try:
         text, interactive = _get_input(args)
-    except OSError as e:
+    except (OSError, UnicodeError) as e:
         print(f"dcheck: error: cannot read input: {e}", file=sys.stderr)
         return 2
     gen_mode = bool(args.gen)
@@ -353,21 +399,27 @@ def main(argv: list[str] | None = None) -> int:
     else:
         out = (_app_dir() if interactive else Path.cwd()) / DEFAULT_OUT
     save = not args.no_save
-    resume = args.resume or (gen_mode and not args.fresh)
+    resume = (args.resume or gen_mode) and not args.fresh
     done = load_done(out) if (save and resume) else set()
 
     # 3. names to check (lazy for --gen: 4c alone is ~1.7 million names)
     valid, invalid = runner.prepare(runner.parse_list(text)) if text else ([], [])
+    if done:
+        valid = [n for n in valid if n not in done]
+        invalid = [r for r in invalid if r.username not in done]
     total = len(valid) + len(invalid)
     names: Iterable[str] = valid
     if gen_mode:
-        names = itertools.chain(valid, *(
+        listed = set(valid)
+        gen_names: Iterable[str] = itertools.chain(*(
             generate.combos(n, args.charset, shuffle=args.shuffle or n >= 4) for n in lengths))
-        total += sum(generate.total(n, args.charset) for n in lengths)
-    if done:
-        invalid = [r for r in invalid if r.username not in done]
-        names = (n for n in names if n not in done)
-        total = max(0, total - len(done))
+        skip = done | listed
+        if skip:
+            gen_names = (n for n in gen_names if n not in skip)
+        names = itertools.chain(valid, gen_names)
+        space = sum(generate.total(n, args.charset) for n in lengths)
+        already = sum(1 for d in skip if generate.in_space(d, lengths, args.charset))
+        total += space - already
     if args.limit is not None:
         names = itertools.islice(names, args.limit)
         total = min(total, args.limit + len(invalid))
@@ -402,6 +454,8 @@ def main(argv: list[str] | None = None) -> int:
     def report(r: Result) -> None:
         nonlocal n_done
         with lock:
+            if writer is not None and writer.closed:
+                return
             n_done += 1
             counts[r.status] += 1
             if keep:
@@ -430,9 +484,16 @@ def main(argv: list[str] | None = None) -> int:
         interrupted = True
         print("\nStopped." + (" Run the same thing again to continue." if gen_mode else ""),
               file=sys.stderr)
-    finally:
+    except OSError as e:
+        print(f"\ndcheck: error: cannot write results: {e}", file=sys.stderr)
         if writer is not None:
-            writer.close()
+            with lock:
+                writer.close()
+        return _finish(1, interactive)
+    finally:
+        if writer is not None and not writer.closed:
+            with lock:
+                writer.close()
 
     try:
         _write_exports(args, collected)
@@ -443,6 +504,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nDone: {n_done} checked - {counts[Status.AVAILABLE]} available, "
           f"{counts[Status.TAKEN]} taken, {counts[Status.INVALID]} invalid, "
           f"{counts[Status.ERROR]} errors")
+    if writer is not None and writer.backup is not None:
+        print(f"Earlier results were moved to: {writer.backup.resolve()}")
     if writer is not None and n_done:
         msg = f"Results saved to: {out.resolve()}"
         if counts[Status.AVAILABLE]:

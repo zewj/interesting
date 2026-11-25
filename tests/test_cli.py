@@ -277,6 +277,8 @@ def test_new_run_replaces_old_results(tmp_path, fake, no_stdin, capsys):
     f = write(tmp_path, "n.txt", "avone\n")
     assert cli.main([f]) == 0
     assert (out / "available.txt").read_text() == "avone\n"
+    (backup,) = out.glob("previous-*")
+    assert (backup / "available.txt").read_text() == "stale\n"  # old results kept
 
 
 def test_resume_skips_done_names(tmp_path, fake, no_stdin, capsys):
@@ -347,3 +349,47 @@ def test_ctrl_c_keeps_found_names(tmp_path, monkeypatch, no_stdin, capsys):
     f = write(tmp_path, "n.txt", "one two three four\n")
     assert cli.main([f]) == 130
     assert (tmp_path / "results" / "available.txt").read_text().split() == ["one", "two"]
+
+
+def test_resume_with_new_list_still_checks_it(tmp_path, fake, no_stdin, capsys):
+    old = write(tmp_path, "old.txt", " ".join(f"takenold{i}" for i in range(20)))
+    assert cli.main([old]) == 0
+    fake.checked.clear()
+    new = write(tmp_path, "new.txt", "avnew1 avnew2 takenold3\n")
+    assert cli.main([new, "--resume", "--no-color"]) == 0
+    assert fake.checked == ["avnew1", "avnew2"]
+    assert "(2/2)" in capsys.readouterr().out
+
+
+def test_write_error_stops_run_with_exit_1(tmp_path, monkeypatch, fake, no_stdin, capsys):
+    def broken(self, r):
+        raise PermissionError("available.txt is open in another program")
+
+    monkeypatch.setattr(cli.ResultWriter, "write", broken)
+    f = write(tmp_path, "n.txt", " ".join(f"av{i}" for i in range(50)))
+    assert cli.main([f]) == 1
+    assert "cannot write results" in capsys.readouterr().err
+    assert len(fake.checked) < 50
+
+
+def test_utf16_and_ansi_files(tmp_path, fake, no_stdin, capsys):
+    (tmp_path / "u16.txt").write_bytes("avone\r\ntakenone\r\n".encode("utf-16"))
+    (tmp_path / "ansi.txt").write_bytes("avtwo\ncaf\xe9\n".encode("cp1252"))
+    assert cli.main([str(tmp_path / "u16.txt"), str(tmp_path / "ansi.txt")]) == 0
+    assert fake.checked == ["avone", "takenone", "avtwo"]  # cafe-with-accent is invalid
+
+
+def test_gen_complete_run_says_nothing_left_for_all_charset(tmp_path, monkeypatch, fake,
+                                                            no_stdin, capsys):
+    monkeypatch.setattr(cli.generate, "CHARSETS", {**cli.generate.CHARSETS, "all": "a."})
+    assert cli.main(["--gen", "2", "--charset", "all"]) == 0
+    assert sorted(fake.checked) == [".a", "a.", "aa"]
+    assert cli.main(["--gen", "2", "--charset", "all"]) == 0
+    assert "Nothing left to check" in capsys.readouterr().out
+
+
+def test_fresh_beats_resume(tmp_path, fake, no_stdin, capsys):
+    assert cli.main(["--gen", "2", "--charset", "digits", "--limit", "10"]) == 0
+    fake.checked.clear()
+    assert cli.main(["--gen", "2", "--charset", "digits", "--fresh", "--resume"]) == 0
+    assert len(fake.checked) == 100

@@ -15,8 +15,21 @@ CHARSETS = {
 
 
 def total(length: int, charset: str) -> int:
-    """Number of combinations (before dropping names containing '..')."""
-    return len(CHARSETS[charset]) ** length
+    """Exact number of names ``combos`` yields (names containing '..' are excluded)."""
+    chars = CHARSETS[charset]
+    if "." not in chars or length < 1:
+        return len(chars) ** length
+    other = len(chars) - 1
+    no_dot, dot = other, 1  # counts of valid strings ending in a non-period / a period
+    for _ in range(length - 1):
+        no_dot, dot = (no_dot + dot) * other, no_dot
+    return no_dot + dot
+
+
+def in_space(name: str, lengths: "list[int]", charset: str) -> bool:
+    """True if ``combos`` for one of ``lengths`` would yield ``name``."""
+    chars = CHARSETS[charset]
+    return len(name) in lengths and ".." not in name and all(c in chars for c in name)
 
 
 def _name_at(index: int, length: int, chars: str) -> str:

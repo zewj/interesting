@@ -4,7 +4,17 @@ from dcheck.validate import validate
 
 def test_total():
     assert generate.total(2, "alnum") == 36 ** 2
-    assert generate.total(4, "all") == 38 ** 4
+    for n in (1, 2, 3):
+        for cs in generate.CHARSETS:
+            assert generate.total(n, cs) == sum(1 for _ in generate.combos(n, cs))
+    assert generate.total(4, "all") == 2_080_880  # 38**4 minus names containing ".."
+
+
+def test_in_space():
+    assert generate.in_space("ab", [2], "alnum")
+    assert not generate.in_space("a_", [2], "alnum")
+    assert not generate.in_space("abc", [2], "alnum")
+    assert not generate.in_space("..", [2], "all")
 
 
 def test_combos_complete_and_unique():

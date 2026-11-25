@@ -147,3 +147,37 @@ def test_summarize_has_all_keys():
     assert runner.summarize(results) == {
         "available": 2, "taken": 1, "invalid": 0, "error": 1,
     }
+
+
+def test_on_result_error_stops_and_is_raised():
+    import pytest
+    from dcheck.models import Result, Status
+
+    class Client:
+        def __init__(self):
+            self.n = 0
+
+        def check(self, name):
+            self.n += 1
+            return Result(name, Status.TAKEN)
+
+    def boom(r):
+        raise PermissionError("nope")
+
+    client = Client()
+    with pytest.raises(PermissionError):
+        runner.run([f"n{i}" for i in range(100)], client, workers=3, on_result=boom)
+    assert client.n < 100
+
+
+def test_run_accepts_lazy_iterator():
+    from dcheck.models import Result, Status
+
+    class Client:
+        def check(self, name):
+            return Result(name, Status.AVAILABLE)
+
+    seen = []
+    out = runner.run((f"n{i}" for i in range(20)), Client(), workers=4,
+                     on_result=seen.append, keep_results=False)
+    assert out == [] and len(seen) == 20
